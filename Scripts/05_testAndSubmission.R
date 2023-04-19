@@ -1,7 +1,9 @@
 # ====================================================================================================== #
 # Description
 #
-#   Test and submission
+#   Test and submission. 
+#   NOTE: Because there is so little data, the validation strategy has changed from using train/test split
+#         and CV, to using only CV (04_modelComparison)
 #
 # Change log:
 #   Ver   Date        Comment
@@ -47,9 +49,140 @@ df_train_split %<>%
 
 df_test_split <- testing(output_01$data_split)
 
+best_wflow_id <- "recipe_spline_lightgbm"
 stack_switch <- TRUE 
 # TRUE: Use stacked model from 04b_stacking.R
 # FALSE: Use the best workflow
+contains_gam_switch <- FALSE
+
+# ---- Submission --------------------------------------------------------------
+
+if (stack_switch) {
+  
+  # -- Fit the members on the entire training set
+  
+  if (!contains_gam_switch) {
+  
+    # If the stack does not contain a GAM model, we can just use 
+    model_stack_fit <-
+      fit_members(output_04b$model_stack_ens)
+    
+    model_stack_preds <- 
+      model_stack_fit %>% 
+      predict(
+        output_01$df_test,
+        type = "prob"
+      )
+    
+    df_subm <- 
+      output_01$df_test %>% 
+      cbind(model_stack_preds) %>% # swap for gam or ensemble
+      select(
+        id,
+        "target" = .pred_1
+      ) 
+    
+  } else {
+    
+    # Otherwise, we have to do it manually:
+    model_stack_subm_fit <-
+      blend_coefs$terms %>% 
+      setdiff("(Intercept)") %>% 
+      purrr::set_names() %>% 
+      map(
+        ~ output_04$cv_results %>%
+          extract_workflow(.x) %>%
+          fit(df_train)
+      )
+    
+    model_stack_subm_pred <- 
+      blend_coefs$terms %>% 
+      setdiff("(Intercept)") %>% 
+      purrr::set_names() %>% 
+      map(
+        ~ model_stack_subm_fit[[.x]] %>% 
+          predict(
+            new_data = output_01$df_test,
+            type = "prob"
+          ) %>% 
+          pull(.pred_1)
+      )
+    
+    model_stack_blend <- 
+      model_stack_subm_pred %>% 
+      as_tibble() %>% 
+      mutate(
+        "(Intercept)" = 1L
+      ) %>% 
+      select(
+        blend_coefs$terms
+      ) %>% 
+      mutate( 
+        .pred_1 = # see: output_04b$model_stack_ens$equations
+          sweep(., 2, blend_coefs$estimate, `*`) %>% 
+          rowSums() %>% 
+          stats::binomial()$linkinv()
+      ) %>% 
+      rowwise() %>% 
+      mutate(
+        .pred_1_simple = mean(c_across(starts_with("recipe"))) # simple average, just for testing
+      )
+    
+    df_subm <- 
+      output_01$df_test %>% 
+      cbind(model_stack_blend) %>% # swap for gam or ensemble
+      select(
+        id,
+        "target" = .pred_1_simple
+      ) 
+    
+  }
+  
+} else {
+  
+  wflow_final_spec <- 
+    output_04$cv_results %>% 
+    extract_workflow(
+      best_wflow_id
+    ) %>% 
+    finalize_workflow(
+      cv_results_best
+    )
+  
+  wflow_final_fit <- 
+    wflow_final_spec %>% 
+    fit(df_train)
+  
+  subm_pred <- 
+    wflow_final_fit %>% 
+    predict(
+      new_data = output_01$df_test,
+      type = "prob"
+    ) 
+  
+  df_subm <- 
+    output_01$df_test %>% 
+    cbind(subm_pred) %>% # swap for gam or ensemble
+    select(
+      id,
+      "target" = .pred_1
+    ) 
+  
+}
+
+
+# ==== EXPORT ------------------------------------------------------------------------------------------ 
+
+df_subm %>% 
+  fwrite(file = "./Output/05_submission.csv") 
+
+# -- save tracking data
+save(
+  df_expTracking,
+  file = "./Output/04a_tracking.RData"
+)
+
+# ==== UNUSED ------------------------------------------------------------------
 
 # ---- Performance estimate on test set ----------------------------------------
 
@@ -78,7 +211,7 @@ if (stack_switch) {
         gsub("\\.pred_1_", "", x = .) %>% 
         gsub("_\\d_\\d", "", x = .)
     )
-      
+  
   last_fit_preds <-
     blend_coefs$terms %>% 
     setdiff("(Intercept)") %>% 
@@ -116,8 +249,6 @@ if (stack_switch) {
     )
   
 } else {
-  
-  best_wflow_id <- "recipe_spline_lightgbm"
   
   cv_results_best <- 
     output_04$cv_results %>% 
@@ -160,16 +291,15 @@ best_wflow_estimate <-
 # Predictions
 df_test_preds <- 
   if (stack_switch) {
-      
+    
     last_fit_preds
     
   } else {
     
     performance_est %>% 
-    collect_predictions()
+      collect_predictions()
     
   }
-
 # ---- Track experiment --------------------------------------------------------
 
 # Track result for best_wflow_id (the stacked model does not fit in with below structure, so we wont track it for now)
@@ -186,20 +316,20 @@ exp_results$recipe <-
   purrr::set_names() %>% 
   map( # map is unnecessary since length(best_wflow_id) == 1, but it returns a list, which is what we want
     ~ extract_preprocessor(
-        x = output_04$cv_results,
-        id = .x
-      ) %>% 
+      x = output_04$cv_results,
+      id = .x
+    ) %>% 
       butcher::butcher() # reduce memory demand
   )
-  
+
 exp_results$model.spec <- 
   best_wflow_id %>% 
   purrr::set_names() %>% 
   map(
     ~ extract_spec_parsnip(
-        x = output_04$cv_results,
-        id = .x
-      )
+      x = output_04$cv_results,
+      id = .x
+    )
   )
 
 exp_results$tuned.par <- 
@@ -230,102 +360,3 @@ df_expTracking %<>%
     y = exp_results
   )
 
-
-# ---- Submission --------------------------------------------------------------
-
-if (stack_switch) {
-  
-  model_stack_subm_fit <-
-    blend_coefs$terms %>% 
-    setdiff("(Intercept)") %>% 
-    purrr::set_names() %>% 
-    map(
-      ~ output_04$cv_results %>%
-        extract_workflow(.x) %>%
-        fit(df_train)
-    )
-  
-  model_stack_subm_pred <- 
-    blend_coefs$terms %>% 
-    setdiff("(Intercept)") %>% 
-    purrr::set_names() %>% 
-    map(
-      ~ model_stack_subm_fit[[.x]] %>% 
-        predict(
-          new_data = output_01$df_test,
-          type = "prob"
-        ) %>% 
-        pull(.pred_1)
-    )
-    
-  model_stack_blend <- 
-    model_stack_subm_pred %>% 
-    as_tibble() %>% 
-    mutate(
-      "(Intercept)" = 1L
-    ) %>% 
-    select(
-      blend_coefs$terms
-    ) %>% 
-    mutate( 
-      .pred_1 = # see: output_04b$model_stack_ens$equations
-        sweep(., 2, blend_coefs$estimate, `*`) %>% 
-        rowSums() %>% 
-        stats::binomial()$linkinv()
-    ) %>% 
-    rowwise() %>% 
-    mutate(
-      .pred_1_simple = mean(c_across(starts_with("recipe"))) # simple average, just for testing
-    )
-  
-  df_subm <- 
-    df_test %>% 
-    cbind(model_stack_blend) %>% # swap for gam or ensemble
-    select(
-      id,
-      "target" = .pred_1
-    ) 
-  
-} else {
-  
-  wflow_final_spec <- 
-    output_04$cv_results %>% 
-    extract_workflow(
-      best_wflow_id
-    ) %>% 
-    finalize_workflow(
-      cv_results_best
-    )
-  
-  wflow_final_fit <- 
-    wflow_final_spec %>% 
-    fit(df_train)
-  
-  subm_pred <- 
-    wflow_final_fit %>% 
-    predict(
-      new_data = output_01$df_test,
-      type = "prob"
-    ) 
-  
-  df_subm <- 
-    df_test %>% 
-    cbind(subm_pred) %>% # swap for gam or ensemble
-    select(
-      id,
-      "target" = .pred_1
-    ) 
-  
-}
-
-
-# ==== EXPORT ------------------------------------------------------------------------------------------ 
-
-df_subm %>% 
-  fwrite(file = "./Output/05_submission.csv") 
-
-# -- save tracking data
-save(
-  df_expTracking,
-  file = "./Output/04a_tracking.RData"
-)

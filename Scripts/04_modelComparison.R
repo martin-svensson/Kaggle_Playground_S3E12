@@ -21,6 +21,8 @@ library(magrittr)
 library(tidymodels)
 library(finetune) # race approach
 library(bonsai) # lightgbm
+library(baguette) # MARS
+library(rules) # C5
 
 library(tictoc)
 
@@ -36,9 +38,17 @@ load("./Output/04a_tracking.RData")
 # PROGRAM
 # ------------------------------------------------------------------------------------------------------ #
 
-df_train_split <- training(output_01$data_split)
+# we use the entire training because there is so little data overall (better strategy than using test data)
 
-df_train_split %<>% 
+# df_train_split <- training(output_01$data_split)
+# 
+# df_train_split %<>% 
+#   rows_append(
+#     y = output_01$df_train_org
+#   )
+
+df_train <- 
+  output_01$df_train %>% 
   rows_append(
     y = output_01$df_train_org
   )
@@ -97,6 +107,45 @@ gam_spec <-
   ) %>% 
   set_mode("classification")
 
+# -- MARS: Paramters have been set based on grid search
+mars_spec <- 
+  mars(
+    num_terms = 3,
+    prod_degree = 1,
+    prune_method = "backward"
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("earth")
+
+# -- Bagged MARS: Paramters have been set based on grid search 
+bagmars_spec <- 
+  bag_mars(
+    num_terms = 4,
+    prod_degree = 1,
+    prune_method = "backward"
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("earth")
+
+# -- C5: Paramters have been set based on grid search
+C5_spec <- 
+  C5_rules(
+    trees = 60,
+    min_n = 25
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("C5.0")
+
+# -- KNN: Paramters have been set based on grid search
+knn_spec <- 
+  nearest_neighbor(
+    neighbors = 10,
+    weight_func = "rank",
+    dist_power = 1
+  ) %>% 
+  set_mode("classification") %>% 
+  set_engine("kknn")
+
 # ---- Workflow set ------------------------------------------------------------
 
 wflow <- 
@@ -104,10 +153,10 @@ wflow <-
     preproc = 
       list(
         "recipe_base" = output_03$recipe_base,
-        #"recipe_noorg" = output_03$recipe_noorg, # performs worse than recipe_base
+        "recipe_noorg" = output_03$recipe_noorg, # performs worse than recipe_base
         "recipe_norm" = output_03$recipe_norm,
         "recipe_mfeng" = output_03$recipe_mfeng,
-        #"recipe_mini" = output_03$recipe_mini,
+        "recipe_mini" = output_03$recipe_mini,
         "recipe_int" = output_03$recipe_int,
         "recipe_spline" = output_03$recipe_spline
       ),
@@ -115,7 +164,11 @@ wflow <-
       list(
         "xgboost" = xgb_spec,
         "glm" = glm_spec,
-        "lightgbm" = lightgbm_spec
+        "lightgbm" = lightgbm_spec,
+        "mars" = mars_spec,
+        "bagmars" = bagmars_spec,
+        "C5" = C5_spec,
+        "knn" = knn_spec
       )
   )
 
@@ -161,18 +214,20 @@ my_metric_set <-
     mn_log_loss
   )
   
-tic("grid search")
+tic("tuning/CV estimate")
 cv_results <- 
+  #wflow %>% 
   wflow_all %>% 
   workflow_map(
     # fit_resamples is used automatically when no parameters are tagged with tune()
     #"tune_race_anova", # faster, more crude, tuning compared to grid search
-    seed = 489321,
+    seed = 8132016,
     resamples = 
       vfold_cv(
-        df_train_split, 
+        df_train, 
         v = 5,
-        strata = target
+        strata = target,
+        repeats = 10
       ),
     grid = 4,
     control = 
@@ -210,7 +265,7 @@ if (tune_switch) {
   
   cv_results %>% 
     autoplot(
-      id = "recipe_base_gam",
+      id = "recipe_base_mars",
       metric = "roc_auc"
     )
   
@@ -243,7 +298,7 @@ df_large_res <-
   ) 
 
 df_res_inspect <- 
-  df_train_split %>%
+  df_train %>%
   dplyr::slice(df_large_res$.row) %>% 
   unique %>% 
   select(!c(id, target))  

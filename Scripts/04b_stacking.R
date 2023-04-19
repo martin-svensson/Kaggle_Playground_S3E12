@@ -34,24 +34,25 @@ model_stack <-
   stacks() %>% 
   add_candidates(output_04$cv_results)
 
-set.seed(845635)
+set.seed(1681138)
 
 model_stack_ens <- 
   blend_predictions(
     model_stack,
-    penalty = 10^seq(-3, 0, length = 20)
+    penalty = 10^seq(-3, 0, length = 25),
+    metric = metric_set(roc_auc),
+    times = 100
   )
 
 # -- Compare penalty values
-autoplot(
-  model_stack_ens
-)
+autoplot(model_stack_ens)
 
 # -- See member coefficients
 autoplot(
   model_stack_ens,
   "weights"
 )
+
 
 # ==== EXPORT ------------------------------------------------------------------------------------------ 
 
